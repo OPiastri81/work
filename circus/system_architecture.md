@@ -62,7 +62,7 @@ graph TD
 
     subgraph "AWS"
         G --> H[AWS S3<br/>output_multi_new.csv]
-        H --> I[EC2: Pythonスクリプト<br/>register_with_status_create_button_assignee_debug.py]
+        H --> I[EC2: Pythonスクリプト<br/>register_with_status_create_button_assignee_debug.py<br/>30分に1回実行]
         I --> J[Circusシステム<br/>求職者登録]
         J --> K[AWS S3<br/>registration_multi_result.csv]
     end
@@ -139,7 +139,7 @@ graph TD
 **実行スクリプト**: `/home/ec2-user/register_with_status_create_button_assignee_debug.py`  
 **概要**: EC2インスタンス上でPythonスクリプトが定期実行され、S3に保存されたCSVデータを読み込み、Circusシステムへ求職者情報を登録します。
 
-**実行頻度**: 毎時0分 (`0 * * * *`) のCronジョブにより実行  
+**実行頻度**: 30分に1回 (`0,30 * * * *`) のCronジョブにより実行  
 **ログイン情報**: 環境変数 `email`, `password` で管理  
 **実行ログ**: `/home/ec2-user/logs/registration.log`
 
