@@ -47,6 +47,7 @@ prefecture_map = {
     "海外": "48"
 }
 
+# 担当者マッピング定義
 assignee_map = {
     "igarasi": {"name": "五十嵐 翔", "id": "3665"},
     "yoshizawa": {"name": "吉澤　亜沙美", "id": "3682"},
@@ -59,12 +60,11 @@ assignee_map = {
     "matsumoto": {"name": "松本秀香", "id": "22689"}
 }
 
-def get_csv_from_s3():
-    """S3からCSVファイルを取得してDataFrameとして返す"""
+def get_csv_from_s3(s3_key):
+    """S3から指定されたCSVファイルを取得してDataFrameとして返す"""
     try:
         s3_client = boto3.client('s3')
         bucket_name = 'dev1-randd'
-        s3_key = 'register-circus/output_data/output_new.csv'
         
         # S3からCSVファイルを取得
         response = s3_client.get_object(Bucket=bucket_name, Key=s3_key)
@@ -79,6 +79,42 @@ def get_csv_from_s3():
         print(f"S3からCSVファイルの取得中にエラーが発生しました: {str(e)}")
         return None
 
+def get_s3_csv_files():
+    """S3のregister-circus/output_data/ディレクトリからoutput_*.csvファイルの一覧を取得"""
+    try:
+        s3_client = boto3.client('s3')
+        bucket_name = 'dev1-randd'
+        prefix = 'register-circus/output_data/output_'
+        
+        # S3からオブジェクト一覧を取得
+        response = s3_client.list_objects_v2(
+            Bucket=bucket_name,
+            Prefix=prefix
+        )
+        
+        csv_files = []
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                key = obj['Key']
+                if key.endswith('.csv'):
+                    csv_files.append(key)
+        
+        print(f"S3から{len(csv_files)}個のCSVファイルを発見しました")
+        return csv_files
+        
+    except Exception as e:
+        print(f"S3からCSVファイル一覧の取得中にエラーが発生しました: {str(e)}")
+        return []
+
+def extract_assignee_key_from_filename(s3_key):
+    """S3キーから担当者キーを抽出"""
+    # 例: register-circus/output_data/output_igarasi.csv -> igarasi
+    filename = s3_key.split('/')[-1]  # output_igarasi.csv
+    if filename.startswith('output_') and filename.endswith('.csv'):
+        assignee_key = filename[7:-4]  # output_ を除去し、.csv を除去
+        return assignee_key
+    return None
+
 def save_to_s3(registration_data_list):
     """登録データをS3にCSV形式で保存"""
     try:
@@ -87,11 +123,11 @@ def save_to_s3(registration_data_list):
         
         # 現在の日時を取得してファイル名に使用
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'registration_result.csv'
+        filename = f'registration_result_{timestamp}.csv'
         
         # CSVデータを作成
         csv_buffer = io.StringIO()
-        fieldnames = ['name', 'furigana', 'birthYear', 'birthMonth', 'birthDay', 'postal', 'address', 'phone', 'email', 'license', 'education', '転記日時', '比較結果']
+        fieldnames = ['name', 'furigana', 'birthYear', 'birthMonth', 'birthDay', 'postal', 'address', 'phone', 'email', 'license', 'education', '転記日時', '比較結果', '担当者']
         writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
         
         # ヘッダーを書き込み
@@ -119,11 +155,11 @@ def save_to_s3(registration_data_list):
         print(f"S3への保存中にエラーが発生しました: {str(e)}")
         return False
 
-def update_csv_status_in_s3(row_index, registration_status="1"):
+def update_csv_status_in_s3(s3_key, row_index, registration_status="1"):
     """S3のCSVファイルの特定の行の比較結果と転記日時を更新"""
     try:
         # S3からCSVファイルを取得
-        df = get_csv_from_s3()
+        df = get_csv_from_s3(s3_key)
         if df is None:
             return False
         
@@ -134,7 +170,6 @@ def update_csv_status_in_s3(row_index, registration_status="1"):
         # CSVデータをS3にアップロード
         s3_client = boto3.client('s3')
         bucket_name = 'dev1-randd'
-        s3_key = 'register-circus/output_data/output_new.csv'
         
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False, encoding='utf-8')
@@ -146,14 +181,14 @@ def update_csv_status_in_s3(row_index, registration_status="1"):
             ContentType='text/csv'
         )
         
-        print(f"S3のCSVファイルの行 {row_index + 1} の比較結果を更新しました")
+        print(f"S3のCSVファイル {s3_key} の行 {row_index + 1} の比較結果を更新しました")
         return True
         
     except Exception as e:
         print(f"S3のCSVファイルの更新中にエラーが発生しました: {str(e)}")
         return False
 
-def register_job_seeker_with_create(driver, data, row_index, skip_login=False):
+def register_job_seeker_with_create(driver, data, row_index, assignee_id, s3_key, skip_login=False):
     try:
         if not skip_login:
             print("サイトにアクセスします...")
@@ -384,6 +419,41 @@ def register_job_seeker_with_create(driver, data, row_index, skip_login=False):
                 print(f"'{prefecture}' は有効な都道府県ではありません。")
         time.sleep(1)
 
+        # 担当者を選択する処理を追加
+        print(f"担当者を選択します... (担当者ID: {assignee_id})")
+        try:
+            # 担当者選択のドロップダウンを探す
+            assignee_selectors = [
+                "select[name='assignees[0]']",
+                "//select[@name='assignees[0]']",
+                "//select[contains(@class, 'MuiNativeSelect-select')]"
+            ]
+            
+            assignee_element = None
+            for selector in assignee_selectors:
+                try:
+                    if selector.startswith("//"):
+                        assignee_element = wait.until(EC.presence_of_element_located((By.XPATH, selector)))
+                    else:
+                        assignee_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                    if assignee_element:
+                        print(f"担当者選択ドロップダウンを見つけました: {selector}")
+                        break
+                except Exception as e:
+                    print(f"担当者選択セレクタ {selector} でエラー: {str(e)}")
+                    continue
+            
+            if assignee_element:
+                assignee_select = Select(assignee_element)
+                assignee_select.select_by_value(assignee_id)
+                print(f"担当者ID {assignee_id} を選択しました")
+            else:
+                print("担当者選択ドロップダウンが見つかりませんでした")
+                
+        except Exception as e:
+            print(f"担当者選択中にエラーが発生しました: {str(e)}")
+            print("担当者選択をスキップして続行します")
+
         # 「作成する」ボタンをクリックする処理
         print("『作成する』ボタンをクリックします...")
         try:
@@ -485,7 +555,7 @@ def register_job_seeker_with_create(driver, data, row_index, skip_login=False):
         
         # S3のCSVファイルの比較結果を更新
         print("S3のCSVファイルの比較結果を更新します...")
-        if update_csv_status_in_s3(row_index, "1"):
+        if update_csv_status_in_s3(s3_key, row_index, "1"):
             print(f"求職者 {data['name']} の比較結果を正常に更新しました。")
         else:
             print(f"求職者 {data['name']} の比較結果の更新に失敗しました。")
@@ -504,7 +574,8 @@ def register_job_seeker_with_create(driver, data, row_index, skip_login=False):
             'license': data.get('license', ''),
             'education': data.get('education', ''),
             '転記日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            '比較結果': '1'
+            '比較結果': '1',
+            '担当者': assignee_id
         }
         
         # 登録データをグローバルリストに追加
@@ -525,60 +596,90 @@ def main():
     
     driver = create_driver()
     try:
-        # S3からCSVファイルを取得
-        df = get_csv_from_s3()
-        if df is None:
-            print("S3からCSVファイルの取得に失敗しました。処理を終了します。")
+        # S3からCSVファイル一覧を取得
+        csv_files = get_s3_csv_files()
+        if not csv_files:
+            print("S3からCSVファイルが見つかりませんでした。処理を終了します。")
             return
         
-        # CSVファイルの列名を確認
-        print(f"CSVファイルの列名: {list(df.columns)}")
+        print(f"処理対象のCSVファイル数: {len(csv_files)}")
         
-        # 「比較結果」列が存在しない場合は追加
-        if '比較結果' not in df.columns:
-            print("「比較結果」列が存在しないため、新しく追加します。")
-            df['比較結果'] = ''
-            df['転記日時'] = ''
+        # 全体の処理回数をカウント（ログイン制御用）
+        total_processed = 0
+        
+        # 各CSVファイルを処理
+        for csv_file in csv_files:
+            print(f"\n=== CSVファイル処理開始: {csv_file} ===")
             
-            # 更新されたCSVをS3に保存
-            s3_client = boto3.client('s3')
-            bucket_name = 'dev1-randd'
-            s3_key = 'register-circus/output_data/output_new.csv'
+            # ファイル名から担当者キーを抽出
+            assignee_key = extract_assignee_key_from_filename(csv_file)
+            if not assignee_key:
+                print(f"ファイル名から担当者キーを抽出できませんでした: {csv_file}")
+                continue
             
-            csv_buffer = io.StringIO()
-            df.to_csv(csv_buffer, index=False, encoding='utf-8')
+            # 担当者マッピングから担当者IDを取得
+            if assignee_key not in assignee_map:
+                print(f"担当者キー '{assignee_key}' に対応する担当者情報が見つかりませんでした")
+                continue
             
-            s3_client.put_object(
-                Bucket=bucket_name,
-                Key=s3_key,
-                Body=csv_buffer.getvalue().encode('utf-8'),
-                ContentType='text/csv'
-            )
-            print("「比較結果」列を追加してS3に保存しました。")
-        
-        # 未登録の行のみを処理（比較結果が空または空文字の行）
-        unregistered_rows = df[df['比較結果'].isna() | (df['比較結果'] == '') | (df['比較結果'] == '""')]
-        
-        # デバッグ情報を追加
-        print(f"CSVファイルの総行数: {len(df)}")
-        print("比較結果列の値の分布:")
-        print(df['比較結果'].value_counts())
-        print("\n比較結果列の詳細:")
-        for i, value in enumerate(df['比較結果']):
-            print(f"行 {i+1}: '{value}' (型: {type(value)})")
-        
-        if unregistered_rows.empty:
-            print("登録対象のデータがありません。")
-            return
-        
-        print(f"登録対象のデータ数: {len(unregistered_rows)}件")
-        
-        for i, (index, row) in enumerate(unregistered_rows.iterrows()):
-            print(f"\n=== 行 {index + 1} の処理を開始 ===")
-            # 2行目以降はログインをスキップ
-            skip_login = (i > 0)
-            register_job_seeker_with_create(driver, row, index, skip_login)
-            time.sleep(2)  # 次の登録までの待機時間
+            assignee_info = assignee_map[assignee_key]
+            assignee_id = assignee_info['id']
+            assignee_name = assignee_info['name']
+            
+            print(f"担当者: {assignee_name} (ID: {assignee_id})")
+            
+            # S3からCSVファイルを取得
+            df = get_csv_from_s3(csv_file)
+            if df is None:
+                print(f"CSVファイル {csv_file} の取得に失敗しました。次のファイルに進みます。")
+                continue
+            
+            # CSVファイルの列名を確認
+            print(f"CSVファイルの列名: {list(df.columns)}")
+            
+            # 「比較結果」列が存在しない場合は追加
+            if '比較結果' not in df.columns:
+                print("「比較結果」列が存在しないため、新しく追加します。")
+                df['比較結果'] = ''
+                df['転記日時'] = ''
+                
+                # 更新されたCSVをS3に保存
+                s3_client = boto3.client('s3')
+                bucket_name = 'dev1-randd'
+                
+                csv_buffer = io.StringIO()
+                df.to_csv(csv_buffer, index=False, encoding='utf-8')
+                
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=csv_file,
+                    Body=csv_buffer.getvalue().encode('utf-8'),
+                    ContentType='text/csv'
+                )
+                print("「比較結果」列を追加してS3に保存しました。")
+            
+            # 未登録の行のみを処理（比較結果が空または空文字の行）
+            unregistered_rows = df[df['比較結果'].isna() | (df['比較結果'] == '') | (df['比較結果'] == '""')]
+            
+            # デバッグ情報を追加
+            print(f"CSVファイルの総行数: {len(df)}")
+            print("比較結果列の値の分布:")
+            print(df['比較結果'].value_counts())
+            
+            if unregistered_rows.empty:
+                print("登録対象のデータがありません。次のファイルに進みます。")
+                continue
+            
+            print(f"登録対象のデータ数: {len(unregistered_rows)}件")
+            
+            # 各データ行を処理
+            for i, (index, row) in enumerate(unregistered_rows.iterrows()):
+                print(f"\n=== 行 {index + 1} の処理を開始 ===")
+                # 最初の1回目のみログインを実行、2回目以降はスキップ
+                skip_login = (total_processed > 0)
+                register_job_seeker_with_create(driver, row, index, assignee_id, csv_file, skip_login)
+                total_processed += 1
+                time.sleep(2)  # 次の登録までの待機時間
         
         # すべての登録完了後、まとめてS3に保存
         if all_registration_data:
